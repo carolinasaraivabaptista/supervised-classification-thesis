@@ -1,0 +1,466 @@
+---
+title: "Wine Quality, method 2: regression with Principal Component Regression (PCR)"
+author: "Carolina Baptista"
+date: "2026-06-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Method 2
+
+**This method predicts the exact score: Principal Component Regression estimates the numeric quality of each wine.**
+
+## Phase I: Exploratory analysis
+
+```{r phase1_1}
+library(psych)
+library(ggplot2)
+library(GGally)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(EnvStats)
+
+# Download the UCI white wine data on the first run
+dir.create("data", showWarnings = FALSE)
+wine_file <- "data/winequality-white.csv"
+if (!file.exists(wine_file)) {
+  download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv",
+                destfile = wine_file)
+}
+
+wine <- read.csv(wine_file, sep = ";")
+
+# Factor version of the score (for colouring plots)
+wine$quality_factor <- as.factor(wine$quality)
+
+# DISTRIBUTION OF THE SCORES
+
+plot_scores <- ggplot(wine, aes(x = quality)) +
+  geom_bar(fill = "lightpink", color = "black", alpha = 0.8) +
+  scale_x_continuous(breaks = 3:9) +
+  geom_text(stat = 'count', aes(label = after_stat(count)), vjust = -0.5) +
+  theme_minimal() +
+  labs(title = "Distribution of the wine scores",
+       x = "Score (quality)", y = "Number of wines")
+
+plot_scores
+
+# MEAN PROFILES
+
+mean_table <- wine %>%
+  group_by(quality) %>%
+  summarise(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)))
+
+mean_table
+
+```
+
+```{r phase1_2}
+# NORMALITY DIAGNOSTICS (same in both methods)
+
+# Shapiro-Wilk test
+shapiro_results <- lapply(wine[, 1:11], shapiro.test)
+p_values <- sapply(shapiro_results, function(x) x$p.value)
+
+print(p_values)
+
+# Q-Q plots: alcohol, residual sugar, density, pH
+par(mfrow = c(2, 2))
+qqnorm(wine$alcohol, main = "Q-Q plot: alcohol"); qqline(wine$alcohol, col = "#FF1493")
+qqnorm(wine$residual.sugar, main = "Q-Q plot: residual sugar"); qqline(wine$residual.sugar, col = "#FF1493")
+qqnorm(wine$density, main = "Q-Q plot: density"); qqline(wine$density, col = "#FF1493")
+qqnorm(wine$pH, main = "Q-Q plot: pH"); qqline(wine$pH, col = "#FF1493")
+
+# Q-Q plots: fixed acidity, volatile acidity, citric acid, chlorides
+par(mfrow = c(2, 2))
+qqnorm(wine$fixed.acidity, main = "Q-Q plot: fixed acidity"); qqline(wine$fixed.acidity, col = "#FF1493")
+qqnorm(wine$volatile.acidity, main = "Q-Q plot: volatile acidity"); qqline(wine$volatile.acidity, col = "#FF1493")
+qqnorm(wine$citric.acid, main = "Q-Q plot: citric acid"); qqline(wine$citric.acid, col = "#FF1493")
+qqnorm(wine$chlorides, main = "Q-Q plot: chlorides"); qqline(wine$chlorides, col = "#FF1493")
+
+# Q-Q plots: free sulfur dioxide, sulphates, total sulfur dioxide
+par(mfrow = c(2, 2))
+qqnorm(wine$free.sulfur.dioxide, main = "Q-Q plot: free sulfur dioxide"); qqline(wine$free.sulfur.dioxide, col = "#FF1493")
+qqnorm(wine$sulphates, main = "Q-Q plot: sulphates"); qqline(wine$sulphates, col = "#FF1493")
+qqnorm(wine$total.sulfur.dioxide, main = "Q-Q plot: total sulfur dioxide"); qqline(wine$total.sulfur.dioxide, col = "#FF1493")
+
+# Filliben (probability plot correlation coefficient) test
+filliben_results <- lapply(wine[, 1:11], function(x) gofTest(x, test = "ppcc", distribution = "norm"))
+
+filliben_correlations <- sapply(filliben_results, function(x) x$statistic)
+cat("\nQ-Q plot correlations\n")
+print(filliben_correlations)
+
+
+# SCATTER PLOT MATRICES (same in both methods)
+
+# Panel 1: fixed acidity, volatile acidity, citric acid and pH
+panel_acidity <- ggpairs(
+  wine,
+  columns = c("fixed.acidity", "volatile.acidity", "citric.acid", "pH"),
+  mapping = aes(color = quality_factor),
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5)),
+  title = "Panel 1: scatter plot matrix, acidity profile"
+) + theme_minimal()
+
+print(panel_acidity)
+
+# Panel 2: residual sugar, alcohol, density
+panel_body <- ggpairs(
+  wine,
+  columns = c("residual.sugar", "alcohol", "density"),
+  mapping = aes(color = quality_factor),
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5)),
+  title = "Panel 2: scatter plot matrix, body and sweetness"
+) + theme_minimal()
+
+print(panel_body)
+
+# Panel 3: free and total sulfur dioxide, chlorides and sulphates
+panel_preservatives <- ggpairs(
+  wine,
+  columns = c("free.sulfur.dioxide", "total.sulfur.dioxide", "chlorides", "sulphates"),
+  mapping = aes(color = quality_factor),
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5)),
+  title = "Panel 3: scatter plot matrix, preservatives and minerals"
+) + theme_minimal()
+
+print(panel_preservatives)
+
+
+# Correlation matrix: 11 chemical variables + quality
+cor_matrix <- cor(wine[, c(1:11, 12)])
+
+corrplot(cor_matrix, method = "number", type = "lower",
+         tl.col = "black", tl.srt = 45,
+         number.cex = 0.7, col = colorRampPalette(c("#BB4444", "#FFFFFF", "#4477AA"))(200),
+         title = "Correlation matrix",
+         mar = c(0, 0, 1, 0))
+
+```
+
+## Phase II: Skewness and log transform
+
+```{r phase2}
+library(e1071)
+
+# Skewness of the 11 chemical variables, from most to least skewed
+skewness_values <- sapply(wine[, 1:11], skewness)
+skewness_sorted <- sort(skewness_values, decreasing = TRUE)
+
+print(skewness_sorted)
+
+df_skewness <- data.frame(Variable = names(skewness_sorted),
+                          Skewness = skewness_sorted)
+df_skewness$Variable <- factor(df_skewness$Variable, levels = df_skewness$Variable)
+
+skewness_plot <- ggplot(df_skewness, aes(x = Variable, y = Skewness, fill = Skewness > 1)) +
+  geom_col(color = "black") +
+  scale_fill_manual(values = c("TRUE" = "pink", "FALSE" = "lightblue"),
+                    name = "High skewness (> 1)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        aspect.ratio = 0.5) +
+  labs(title = "Skewness of each variable",
+       x = "Variable",
+       y = "Skewness coefficient")
+
+print(skewness_plot)
+
+
+# Effect of the transform (residual sugar as an example)
+
+p_orig_hist <- ggplot(wine, aes(x = residual.sugar)) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Residual sugar (original)", x = "g/dm³", y = "Frequency")
+
+p_log_hist <- ggplot(wine, aes(x = log10(residual.sugar))) +
+  geom_histogram(bins = 30, fill = "pink", color = "black") +
+  theme_minimal() +
+  labs(title = "Residual sugar (log10)", x = "log10(g/dm³)", y = "Frequency")
+
+grid.arrange(p_orig_hist, p_log_hist, ncol = 2)
+
+
+# Stabilised dataset: log10 only on the variables with skewness > 1 (pink bars)
+wine_pca <- wine %>%
+  mutate(
+    log_chlorides = log10(chlorides),
+    log_volatile.acidity = log10(volatile.acidity),
+    log_free.SO2 = log10(free.sulfur.dioxide),
+    log_citric.acid = log10(citric.acid + 0.01), # +0.01 avoids log10(0)
+    log_residual.sugar = log10(residual.sugar)
+  ) %>%
+  dplyr::select(-chlorides, -volatile.acidity, -free.sulfur.dioxide, -citric.acid, -residual.sugar)
+
+```
+
+## Phase III: Dimensionality reduction (PCA)
+
+```{r phase3}
+library(FactoMineR)
+library(factoextra)
+
+# Numeric predictors only (any_of() drops the column if it exists and does not fail otherwise)
+numeric_data <- wine_pca %>%
+  dplyr::select(-quality, -dplyr::any_of("quality_factor"))
+
+# Components and variance criterion
+pca_result <- PCA(numeric_data, scale.unit = TRUE, ncp = 11, graph = FALSE)
+
+eig_val <- get_eigenvalue(pca_result)
+print(eig_val)
+
+# Contribution (%) of each variable to PC1 and PC2
+var_pca <- get_pca_var(pca_result)
+print(round(var_pca$contrib[, 1:2], 2))
+
+```
+
+## Phase IV: Principal Component Regression (PCR) and evaluation
+
+```{r phase4}
+# First 6 components (6 PCs already retain 81.7% of the cumulative variance)
+model_data <- as.data.frame(pca_result$ind$coord[, 1:6])
+model_data$quality <- wine_pca$quality
+
+
+# TRAIN (60%), VALIDATION (20%) AND TEST (20%) SPLIT
+
+set.seed(123)
+n_total <- nrow(model_data)
+shuffled_idx <- sample(1:n_total)
+train_cut <- round(0.60 * n_total)
+val_cut   <- round(0.80 * n_total)
+
+train_idx <- shuffled_idx[1:train_cut]
+val_idx   <- shuffled_idx[(train_cut + 1):val_cut]
+test_idx  <- shuffled_idx[(val_cut + 1):n_total]
+
+train_data <- model_data[train_idx, ]
+val_data   <- model_data[val_idx, ]
+test_data  <- model_data[test_idx, ]
+
+cat("Sizes - train:", nrow(train_data), "| validation:", nrow(val_data), "| test:", nrow(test_data), "\n\n")
+
+
+# FIT THREE LINEAR REGRESSION MODELS (lm)
+
+pcr_4pc <- lm(quality ~ Dim.1 + Dim.2 + Dim.3 + Dim.4, data = train_data)
+pcr_5pc <- lm(quality ~ Dim.1 + Dim.2 + Dim.3 + Dim.4 + Dim.5, data = train_data)
+pcr_6pc <- lm(quality ~ Dim.1 + Dim.2 + Dim.3 + Dim.4 + Dim.5 + Dim.6, data = train_data)
+
+
+# MODEL SELECTION ON THE VALIDATION SET
+
+pred_4pc <- predict(pcr_4pc, newdata = val_data)
+pred_5pc <- predict(pcr_5pc, newdata = val_data)
+pred_6pc <- predict(pcr_6pc, newdata = val_data)
+
+# Mean absolute error: by how many points the model misses the real score
+mae_4pc <- mean(abs(pred_4pc - val_data$quality))
+mae_5pc <- mean(abs(pred_5pc - val_data$quality))
+mae_6pc <- mean(abs(pred_6pc - val_data$quality))
+
+cat("Validation mean absolute error\n")
+cat("MAE (4 PCs):", round(mae_4pc, 3), "points\n")
+cat("MAE (5 PCs):", round(mae_5pc, 3), "points\n")
+cat("MAE (6 PCs):", round(mae_6pc, 3), "points\n")
+
+
+# BLIND TEST WITH THE 6-PC MODEL
+
+final_predictions <- predict(pcr_6pc, newdata = test_data)
+
+final_mae <- mean(abs(final_predictions - test_data$quality))
+cat("Final test MAE:", round(final_mae, 3), "points\n")
+
+# "Pseudo confusion matrix": predictions are continuous, so round them first
+rounded_predictions <- round(final_predictions)
+
+hit_table <- table(Actual = test_data$quality, Predicted = rounded_predictions)
+cat("Hit table (rounded predictions)\n")
+print(hit_table)
+
+# Exact accuracy and accuracy within a 1-point tolerance
+exact_accuracy <- mean(rounded_predictions == test_data$quality) * 100
+tolerant_accuracy <- mean(abs(rounded_predictions - test_data$quality) <= 1) * 100
+
+cat("\nExact accuracy:", round(exact_accuracy, 2), "%\n")
+cat("Tolerant accuracy (within +/- 1 point):", round(tolerant_accuracy, 2), "%\n")
+
+
+# EXPERIMENT WITH 7 AND 11 COMPONENTS
+# How low can the error go? (The small gain is not worth the extra components.)
+
+all_pc_data <- as.data.frame(pca_result$ind$coord[, 1:11])
+all_pc_data$quality <- wine_pca$quality
+
+# Same train/validation split as above
+set.seed(123)
+n_total <- nrow(all_pc_data)
+shuffled_idx <- sample(1:n_total)
+
+train_cut <- round(0.60 * n_total)
+val_cut   <- round(0.80 * n_total)
+
+train_idx <- shuffled_idx[1:train_cut]
+val_idx   <- shuffled_idx[(train_cut + 1):val_cut]
+
+train_all <- all_pc_data[train_idx, ]
+val_all   <- all_pc_data[val_idx, ]
+
+pcr_7pc <- lm(quality ~ Dim.1 + Dim.2 + Dim.3 + Dim.4 + Dim.5 + Dim.6 + Dim.7, data = train_all)
+
+# '.' means "use every available column" (all 11 PCs)
+pcr_11pc <- lm(quality ~ ., data = train_all)
+
+pred_7pc  <- predict(pcr_7pc, newdata = val_all)
+pred_11pc <- predict(pcr_11pc, newdata = val_all)
+
+mae_7pc  <- mean(abs(pred_7pc - val_all$quality))
+mae_11pc <- mean(abs(pred_11pc - val_all$quality))
+
+cat("MAE (7 PCs):", round(mae_7pc, 3), "points\n")
+cat("MAE (11 PCs, the upper bound):", round(mae_11pc, 3), "points\n")
+```
+
+## Phase V: Outliers and robustness
+
+```{r phase5}
+# VISUAL INSPECTION OF OUTLIERS
+# factor(quality) gives one box per score (3 to 9)
+
+# Panel 1: acidity profile
+p_fixed <- ggplot(wine, aes(x = factor(quality), y = fixed.acidity, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Fixed acidity", x = "", y = "g/dm³")
+
+p_volatile <- ggplot(wine, aes(x = factor(quality), y = volatile.acidity, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Volatile acidity", x = "", y = "g/dm³")
+
+p_citric <- ggplot(wine, aes(x = factor(quality), y = citric.acid, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Citric acid", x = "", y = "g/dm³")
+
+p_pH <- ggplot(wine, aes(x = factor(quality), y = pH, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "pH", x = "Score (quality)", y = "pH")
+
+grid.arrange(p_fixed, p_volatile, p_citric, p_pH, ncol = 2,
+             top = "Panel 1: acidity profile by score (distribution and outliers)")
+
+
+# Panel 2: body and sweetness
+p_sugar <- ggplot(wine, aes(x = factor(quality), y = residual.sugar, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Residual sugar", x = "", y = "g/dm³")
+
+p_alcohol <- ggplot(wine, aes(x = factor(quality), y = alcohol, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Alcohol", x = "", y = "% vol.")
+
+p_density <- ggplot(wine, aes(x = factor(quality), y = density, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Density", x = "Score (quality)", y = "g/cm³")
+
+grid.arrange(p_sugar, p_alcohol, p_density, ncol = 2,
+             top = "Panel 2: body and sweetness by score (distribution and outliers)")
+
+
+# Panel 3: preservatives and minerals
+p_free <- ggplot(wine, aes(x = factor(quality), y = free.sulfur.dioxide, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Free sulfur dioxide", x = "", y = "mg/dm³")
+
+p_total <- ggplot(wine, aes(x = factor(quality), y = total.sulfur.dioxide, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Total sulfur dioxide", x = "", y = "mg/dm³")
+
+p_chlor <- ggplot(wine, aes(x = factor(quality), y = chlorides, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Chlorides", x = "Score (quality)", y = "g/dm³")
+
+p_sulph <- ggplot(wine, aes(x = factor(quality), y = sulphates, fill = factor(quality))) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Sulphates", x = "Score (quality)", y = "g/dm³")
+
+grid.arrange(p_free, p_total, p_chlor, p_sulph, ncol = 2,
+             top = "Panel 3: preservatives and minerals by score (distribution and outliers)")
+
+
+# OUTLIER DETECTION AND REMOVAL (1.5 x IQR RULE)
+
+is_outlier <- function(x) {
+  q1 <- quantile(x, 0.25, na.rm = TRUE)
+  q3 <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  lower <- q1 - 1.5 * iqr
+  upper <- q3 + 1.5 * iqr
+
+  return(x < lower | x > upper)
+}
+
+# Numeric columns only, without the 'quality' score
+numeric_vars <- wine_pca %>%
+  dplyr::select(where(is.numeric), -quality)
+
+outlier_counts <- sapply(numeric_vars, function(x) sum(is_outlier(x)))
+
+cat("\n Outliers per variable (IQR rule) \n")
+print(sort(outlier_counts, decreasing = TRUE))
+
+# Cleaned dataset: keep only the rows that are not outliers in any column
+wine_clean <- wine_pca
+for (column in names(numeric_vars)) {
+  wine_clean <- wine_clean[!is_outlier(wine_clean[[column]]), ]
+}
+
+cat("\n--- Effect of the cleaning ---\n")
+cat("Original size:", nrow(wine_pca), "wines.\n")
+cat("Cleaned size:", nrow(wine_clean), "wines.\n")
+cat("Wines removed:", nrow(wine_pca) - nrow(wine_clean), "\n")
+
+clean_chemistry <- wine_clean %>%
+  dplyr::select(where(is.numeric), -quality)
+
+pca_clean <- PCA(clean_chemistry, scale.unit = TRUE, ncp = 11, graph = FALSE)
+
+clean_model_data <- as.data.frame(pca_clean$ind$coord[, 1:6])
+clean_model_data$quality <- wine_clean$quality
+
+# 80% train / 20% test
+set.seed(123)
+n_clean <- nrow(clean_model_data)
+clean_idx <- sample(1:n_clean)
+
+clean_train_cut <- round(0.80 * n_clean)
+clean_train_idx <- clean_idx[1:clean_train_cut]
+clean_test_idx  <- clean_idx[(clean_train_cut + 1):n_clean]
+
+train_clean <- clean_model_data[clean_train_idx, ]
+test_clean  <- clean_model_data[clean_test_idx, ]
+
+cat("Cleaned sizes - train:", nrow(train_clean), "| test:", nrow(test_clean), "\n\n")
+
+
+# EVALUATION
+
+pcr_clean <- lm(quality ~ Dim.1 + Dim.2 + Dim.3 + Dim.4 + Dim.5 + Dim.6, data = train_clean)
+pred_pcr_clean <- predict(pcr_clean, newdata = test_clean)
+
+mae_clean <- mean(abs(pred_pcr_clean - test_clean$quality))
+pred_pcr_rounded <- round(pred_pcr_clean)
+tolerant_accuracy_clean <- mean(abs(pred_pcr_rounded - test_clean$quality) <= 1) * 100
+
+cat("METHOD 2: REGRESSION (PCR)\n")
+cat("MAE BEFORE: 0.599 | AFTER:", round(mae_clean, 3), "\n")
+cat("Tolerant accuracy BEFORE: 93.98 % | AFTER:", round(tolerant_accuracy_clean, 2), "%\n")
+```

@@ -1,0 +1,431 @@
+---
+title: "Wine Quality, method 1: classification with PCA + LDA"
+author: "Carolina Baptista"
+date: "2026-06-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Method 1
+
+**This method treats the problem as classification: Linear Discriminant Analysis predicts which quality group (Low, Medium, High) a wine belongs to.**
+
+## Phase I: Exploratory analysis
+
+```{r phase1_1}
+
+library(psych)
+library(ggplot2)
+library(GGally)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(EnvStats)
+
+# Download the UCI white wine data on the first run
+dir.create("data", showWarnings = FALSE)
+wine_file <- "data/winequality-white.csv"
+if (!file.exists(wine_file)) {
+  download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv",
+                destfile = wine_file)
+}
+
+wine <- read.csv(wine_file, sep = ";")
+
+# Turn 'quality' into groups: Low (4 or less), Medium (5 and 6) and High (7 or more)
+wine_grouped <- wine %>%
+  mutate(quality_group = case_when(
+    quality <= 4 ~ "Low",
+    quality %in% c(5, 6) ~ "Medium",
+    quality >= 7 ~ "High"
+  )) %>%
+  mutate(quality_group = factor(quality_group, levels = c("Low", "Medium", "High")))
+
+# DISTRIBUTION OF THE SCORES
+
+cat("\n Class distribution (original scores) \n")
+print(table(wine_grouped$quality))
+
+cat("\n Class distribution (groups: Low, Medium, High) \n")
+print(table(wine_grouped$quality_group))
+
+plot_imbalance <- ggplot(wine_grouped, aes(x = quality_group, fill = quality_group)) +
+  geom_bar(color = "black") +
+  scale_fill_manual(values = c("Low" = "lightpink", "Medium" = "lightyellow", "High" = "lightblue")) +
+  geom_text(stat = 'count', aes(label = after_stat(count)), vjust = -0.5) +
+  theme_minimal() +
+  labs(title = "Distribution of the quality groups",
+       x = "Quality group", y = "Number of wines")
+
+print(plot_imbalance)
+
+
+# MEAN PROFILES
+
+mean_profiles <- wine_grouped %>%
+  group_by(quality_group) %>%
+  summarise(across(c(alcohol, residual.sugar, volatile.acidity, density, pH, free.sulfur.dioxide,
+                     fixed.acidity, total.sulfur.dioxide, sulphates, chlorides, citric.acid),
+                   \(x) mean(x, na.rm = TRUE)))
+
+cat("\n Mean profile of each variable by group \n")
+print(mean_profiles)
+
+```
+
+```{r phase1_2}
+# NORMALITY DIAGNOSTICS (same in both methods)
+
+# Shapiro-Wilk test
+shapiro_results <- lapply(wine_grouped[, 1:11], shapiro.test)
+p_values <- sapply(shapiro_results, function(x) x$p.value)
+
+print(p_values)
+
+# Q-Q plots: alcohol, residual sugar, density, pH
+par(mfrow = c(2, 2))
+qqnorm(wine_grouped$alcohol, main = "Q-Q plot: alcohol"); qqline(wine_grouped$alcohol, col = "#FF1493")
+qqnorm(wine_grouped$residual.sugar, main = "Q-Q plot: residual sugar"); qqline(wine_grouped$residual.sugar, col = "#FF1493")
+qqnorm(wine_grouped$density, main = "Q-Q plot: density"); qqline(wine_grouped$density, col = "#FF1493")
+qqnorm(wine_grouped$pH, main = "Q-Q plot: pH"); qqline(wine_grouped$pH, col = "#FF1493")
+
+# Q-Q plots: fixed acidity, volatile acidity, citric acid, chlorides
+par(mfrow = c(2, 2))
+qqnorm(wine_grouped$fixed.acidity, main = "Q-Q plot: fixed acidity"); qqline(wine_grouped$fixed.acidity, col = "#FF1493")
+qqnorm(wine_grouped$volatile.acidity, main = "Q-Q plot: volatile acidity"); qqline(wine_grouped$volatile.acidity, col = "#FF1493")
+qqnorm(wine_grouped$citric.acid, main = "Q-Q plot: citric acid"); qqline(wine_grouped$citric.acid, col = "#FF1493")
+qqnorm(wine_grouped$chlorides, main = "Q-Q plot: chlorides"); qqline(wine_grouped$chlorides, col = "#FF1493")
+
+# Q-Q plots: free sulfur dioxide, sulphates, total sulfur dioxide
+par(mfrow = c(2, 2))
+qqnorm(wine_grouped$free.sulfur.dioxide, main = "Q-Q plot: free sulfur dioxide"); qqline(wine_grouped$free.sulfur.dioxide, col = "#FF1493")
+qqnorm(wine_grouped$sulphates, main = "Q-Q plot: sulphates"); qqline(wine_grouped$sulphates, col = "#FF1493")
+qqnorm(wine_grouped$total.sulfur.dioxide, main = "Q-Q plot: total sulfur dioxide"); qqline(wine_grouped$total.sulfur.dioxide, col = "#FF1493")
+
+# Filliben (probability plot correlation coefficient) test
+filliben_results <- lapply(wine_grouped[, 1:11], function(x) gofTest(x, test = "ppcc", distribution = "norm"))
+
+filliben_correlations <- sapply(filliben_results, function(x) x$statistic)
+cat("\nQ-Q plot correlations\n")
+print(filliben_correlations)
+
+
+# SCATTER PLOT MATRICES (same in both methods)
+
+# Panel 1: fixed acidity, volatile acidity, citric acid and pH
+panel_acidity <- ggpairs(
+  wine_grouped,
+  columns = c("fixed.acidity", "volatile.acidity", "citric.acid", "pH"),
+  mapping = aes(color = quality_group),
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5)),
+  title = "Panel 1: scatter plot matrix, acidity profile"
+) + theme_minimal()
+
+print(panel_acidity)
+
+# Panel 2: residual sugar, alcohol, density
+panel_body <- ggpairs(
+  wine_grouped,
+  columns = c("residual.sugar", "alcohol", "density"),
+  mapping = aes(color = quality_group),
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5)),
+  title = "Panel 2: scatter plot matrix, body and sweetness"
+) + theme_minimal()
+
+print(panel_body)
+
+# Panel 3: free and total sulfur dioxide, chlorides and sulphates
+panel_preservatives <- ggpairs(
+  wine_grouped,
+  columns = c("free.sulfur.dioxide", "total.sulfur.dioxide", "chlorides", "sulphates"),
+  mapping = aes(color = quality_group),
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5)),
+  title = "Panel 3: scatter plot matrix, preservatives and minerals"
+) + theme_minimal()
+
+print(panel_preservatives)
+
+# Correlation matrix (same in both methods): 11 chemical variables + quality
+cor_matrix <- cor(wine_grouped[, c(1:11, 12)])
+
+corrplot(cor_matrix, method = "number", type = "lower",
+         tl.col = "black", tl.srt = 45,
+         number.cex = 0.7, col = colorRampPalette(c("#BB4444", "#FFFFFF", "#4477AA"))(200),
+         title = "Correlation matrix",
+         mar = c(0, 0, 1, 0))
+
+```
+
+## Phase II: Skewness and log transform
+
+```{r phase2}
+library(e1071)
+
+# Skewness of the 11 chemical variables, from most to least skewed
+skewness_values <- sapply(wine_grouped[, 1:11], skewness)
+skewness_sorted <- sort(skewness_values, decreasing = TRUE)
+
+print(skewness_sorted)
+
+df_skewness <- data.frame(Variable = names(skewness_sorted),
+                          Skewness = skewness_sorted)
+df_skewness$Variable <- factor(df_skewness$Variable, levels = df_skewness$Variable)
+
+skewness_plot <- ggplot(df_skewness, aes(x = Variable, y = Skewness, fill = Skewness > 1)) +
+  geom_col(color = "black") +
+  scale_fill_manual(values = c("TRUE" = "pink", "FALSE" = "lightblue"),
+                    name = "High skewness (> 1)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        aspect.ratio = 0.5) +
+  labs(title = "Skewness of each variable",
+       x = "Variable",
+       y = "Skewness coefficient")
+
+skewness_plot
+
+
+# Effect of the transform (residual sugar as an example)
+
+p_orig_hist <- ggplot(wine_grouped, aes(x = residual.sugar)) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Residual sugar (original)", x = "g/dm³", y = "Frequency")
+
+p_log_hist <- ggplot(wine_grouped, aes(x = log10(residual.sugar))) +
+  geom_histogram(bins = 30, fill = "pink", color = "black") +
+  theme_minimal() +
+  labs(title = "Residual sugar (log10)", x = "log10(g/dm³)", y = "Frequency")
+
+grid.arrange(p_orig_hist, p_log_hist, ncol = 2)
+
+
+# Stabilised dataset: log10 only on the variables with skewness > 1 (pink bars)
+wine_pca <- wine_grouped %>%
+  mutate(
+    log_chlorides = log10(chlorides),
+    log_volatile.acidity = log10(volatile.acidity),
+    log_free.SO2 = log10(free.sulfur.dioxide),
+    log_citric.acid = log10(citric.acid + 0.01), # +0.01 avoids log10(0)
+    log_residual.sugar = log10(residual.sugar)
+  ) %>%
+  dplyr::select(-chlorides, -volatile.acidity, -free.sulfur.dioxide, -citric.acid, -residual.sugar)
+
+```
+
+## Phase III: Dimensionality reduction (PCA)
+
+```{r phase3}
+library(FactoMineR)
+library(factoextra)
+
+# PCA needs the numeric variables only (no 'quality' or 'quality_group')
+numeric_data <- wine_pca %>% dplyr::select(-quality, -quality_group)
+
+pca_result <- PCA(numeric_data, scale.unit = TRUE, ncp = 11, graph = FALSE)
+
+eig_val <- get_eigenvalue(pca_result)
+cat("\nVariance explained by each component\n")
+print(eig_val)
+
+```
+
+## Phase IV: Linear Discriminant Analysis (LDA)
+
+```{r phase4}
+library(MASS)
+
+# Model data: the first 6 principal components
+model_data <- as.data.frame(pca_result$ind$coord[, 1:6])
+model_data$quality_group <- wine_pca$quality_group
+
+
+# TRAIN (60%), VALIDATION (20%) AND TEST (20%) SPLIT
+
+set.seed(123)
+n_total <- nrow(model_data)
+
+shuffled_idx <- sample(1:n_total)
+
+train_cut <- round(0.60 * n_total)
+val_cut   <- round(0.80 * n_total) # 60% + 20%
+
+train_idx <- shuffled_idx[1:train_cut]
+val_idx   <- shuffled_idx[(train_cut + 1):val_cut]
+test_idx  <- shuffled_idx[(val_cut + 1):n_total]
+
+train_data <- model_data[train_idx, ]
+val_data   <- model_data[val_idx, ]
+test_data  <- model_data[test_idx, ]
+
+cat("Sizes - train:", nrow(train_data), ", validation:", nrow(val_data), ", test:", nrow(test_data), "\n\n")
+
+
+# FIT THREE MODELS (training data only)
+
+lda_4pc <- lda(quality_group ~ Dim.1 + Dim.2 + Dim.3 + Dim.4, data = train_data)
+lda_5pc <- lda(quality_group ~ Dim.1 + Dim.2 + Dim.3 + Dim.4 + Dim.5, data = train_data)
+lda_6pc <- lda(quality_group ~ Dim.1 + Dim.2 + Dim.3 + Dim.4 + Dim.5 + Dim.6, data = train_data)
+
+
+# MODEL SELECTION ON THE VALIDATION SET (number of components)
+
+pred_4pc <- predict(lda_4pc, val_data)$class
+pred_5pc <- predict(lda_5pc, val_data)$class
+pred_6pc <- predict(lda_6pc, val_data)$class
+
+acc_4pc <- mean(pred_4pc == val_data$quality_group) * 100
+acc_5pc <- mean(pred_5pc == val_data$quality_group) * 100
+acc_6pc <- mean(pred_6pc == val_data$quality_group) * 100
+
+cat("--- Validation accuracy (model selection) ---\n")
+cat(" (4 PCs):", round(acc_4pc, 2), "%\n")
+cat(" (5 PCs):", round(acc_5pc, 2), "%\n")
+cat(" (6 PCs):", round(acc_6pc, 2), "%\n")
+
+
+# FINAL TEST WITH THE 5-PC MODEL
+
+final_predictions <- predict(lda_5pc, test_data)$class
+
+# Rows = actual quality, columns = predicted
+confusion <- table(Actual = test_data$quality_group, Predicted = final_predictions)
+
+cat("\nConfusion matrix\n")
+print(confusion)
+
+test_accuracy <- mean(final_predictions == test_data$quality_group) * 100
+cat("\nFinal test accuracy:", round(test_accuracy, 2), "%\n")
+```
+
+## Phase V: Outliers and robustness
+
+```{r phase5}
+# VISUAL INSPECTION OF OUTLIERS
+
+# Panel 1: acidity profile
+p_fixed <- ggplot(wine_grouped, aes(x = quality_group, y = fixed.acidity, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Fixed acidity", x = "", y = "g/dm³")
+
+p_volatile <- ggplot(wine_grouped, aes(x = quality_group, y = volatile.acidity, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Volatile acidity", x = "", y = "g/dm³")
+
+p_citric <- ggplot(wine_grouped, aes(x = quality_group, y = citric.acid, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Citric acid", x = "", y = "g/dm³")
+
+p_pH <- ggplot(wine_grouped, aes(x = quality_group, y = pH, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "pH", x = "Wine quality", y = "pH")
+
+grid.arrange(p_fixed, p_volatile, p_citric, p_pH, ncol = 2,
+             top = "Panel 1: acidity profile (distribution and outliers)")
+
+
+# Panel 2: body and sweetness
+p_sugar <- ggplot(wine_grouped, aes(x = quality_group, y = residual.sugar, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Residual sugar", x = "", y = "g/dm³")
+
+p_alcohol <- ggplot(wine_grouped, aes(x = quality_group, y = alcohol, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Alcohol", x = "", y = "% vol.")
+
+p_density <- ggplot(wine_grouped, aes(x = quality_group, y = density, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Density", x = "Wine quality", y = "g/cm³")
+
+grid.arrange(p_sugar, p_alcohol, p_density, ncol = 2,
+             top = "Panel 2: body and sweetness (distribution and outliers)")
+
+# Panel 3: preservatives and minerals
+p_free <- ggplot(wine_grouped, aes(x = quality_group, y = free.sulfur.dioxide, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Free sulfur dioxide", x = "", y = "mg/dm³")
+
+p_total <- ggplot(wine_grouped, aes(x = quality_group, y = total.sulfur.dioxide, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Total sulfur dioxide", x = "", y = "mg/dm³")
+
+p_chlor <- ggplot(wine_grouped, aes(x = quality_group, y = chlorides, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Chlorides (salts)", x = "Wine quality", y = "g/dm³")
+
+p_sulph <- ggplot(wine_grouped, aes(x = quality_group, y = sulphates, fill = quality_group)) +
+  geom_boxplot(alpha = 0.7) + theme_minimal() + guides(fill = "none") +
+  labs(title = "Sulphates", x = "Wine quality", y = "g/dm³")
+
+grid.arrange(p_free, p_total, p_chlor, p_sulph, ncol = 2,
+             top = "Panel 3: preservatives and minerals (distribution and outliers)")
+
+
+# OUTLIER DETECTION AND REMOVAL (1.5 x IQR RULE)
+
+is_outlier <- function(x) {
+  q1 <- quantile(x, 0.25, na.rm = TRUE)
+  q3 <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  lower <- q1 - 1.5 * iqr
+  upper <- q3 + 1.5 * iqr
+
+  return(x < lower | x > upper)
+}
+
+numeric_vars <- wine_pca %>% dplyr::select(-quality, -quality_group)
+outlier_counts <- sapply(numeric_vars, function(x) sum(is_outlier(x)))
+
+cat("\n Outliers per variable (IQR rule) \n")
+print(sort(outlier_counts, decreasing = TRUE))
+
+# Cleaned dataset: keep only the rows that are not outliers in any column
+wine_clean <- wine_pca
+for (column in names(numeric_vars)) {
+  wine_clean <- wine_clean[!is_outlier(wine_clean[[column]]), ]
+}
+
+cat("\n--- Effect of the cleaning ---\n")
+cat("Original size:", nrow(wine_pca), "wines.\n")
+cat("Cleaned size:", nrow(wine_clean), "wines.\n")
+cat("Wines removed:", nrow(wine_pca) - nrow(wine_clean), "\n")
+
+
+# REFIT ON THE CLEANED DATA
+
+clean_chemistry <- wine_clean %>% dplyr::select(-quality, -quality_group)
+pca_clean <- PCA(clean_chemistry, scale.unit = TRUE, ncp = 11, graph = FALSE)
+
+clean_model_data <- as.data.frame(pca_clean$ind$coord[, 1:6])
+clean_model_data$quality <- wine_clean$quality
+clean_model_data$quality_group <- wine_clean$quality_group
+
+# 80% train / 20% test
+set.seed(123)
+n_clean <- nrow(clean_model_data)
+clean_idx <- sample(1:n_clean)
+
+clean_train_cut <- round(0.80 * n_clean)
+clean_train_idx <- clean_idx[1:clean_train_cut]
+clean_test_idx  <- clean_idx[(clean_train_cut + 1):n_clean]
+
+train_clean <- clean_model_data[clean_train_idx, ]
+test_clean  <- clean_model_data[clean_test_idx, ]
+
+cat("Cleaned sizes - train:", nrow(train_clean), "| test:", nrow(test_clean), "\n\n")
+
+
+lda_clean <- lda(quality_group ~ Dim.1 + Dim.2 + Dim.3 + Dim.4 + Dim.5, data = train_clean)
+pred_lda_clean <- predict(lda_clean, test_clean)$class
+
+acc_lda_clean <- mean(pred_lda_clean == test_clean$quality_group) * 100
+
+cat("--- METHOD 1: CLASSIFICATION (LDA) ---\n")
+cat("Accuracy BEFORE (with outliers): 75.20 %\n")
+cat("Accuracy AFTER (without outliers):", round(acc_lda_clean, 2), "%\n\n")
+
+```
