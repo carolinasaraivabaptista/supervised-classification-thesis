@@ -1,8 +1,15 @@
 # Supervised Classification: from Iris to Fashion-MNIST (R)
 
+![R](https://img.shields.io/badge/R-4.x-276DC3?logo=r&logoColor=white)
+![R Markdown](https://img.shields.io/badge/R%20Markdown-notebooks-75AADB?logo=rstudioide&logoColor=white)
+![Methods](https://img.shields.io/badge/methods-LDA%20%C2%B7%20PCA%20%C2%B7%20PCR%20%C2%B7%20SVM-8A2BE2)
+![Type](https://img.shields.io/badge/BSc%20thesis-IST%202026-0A9EDC)
+
 How do classical statistical models cope as data gets harder? This project applies multivariate methods to four datasets of increasing complexity, from four flower measurements to 784-pixel images, and focuses on checking assumptions, pre-processing, outliers and the trade-off between accuracy and computational cost, not only on the final score.
 
 BSc final project (*Projeto Integrador de 1.º Ciclo*) in Applied Mathematics and Computation, Instituto Superior Técnico, 2026. Individual work.
+
+![The four datasets: Iris in LDA space, the distribution of wine quality scores, and sample MNIST digits and Fashion-MNIST items](figures/overview.png)
 
 ## Results
 
@@ -33,6 +40,8 @@ analysis/
   05_fashion_mnist_pca_svm.Rmd   Same pipeline on clothing images
 report/
   thesis_pt.pdf                  Full report (in Portuguese)
+figures/
+  overview.png                   Image at the top of this README
 ```
 
 ## Running it
